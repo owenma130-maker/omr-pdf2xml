@@ -88,19 +88,15 @@ def cmd_omr2xml(args):
 # pdf2xml
 # ----------------------------------------------------------------------
 def find_audiveris(explicit=None):
-    if explicit:
-        p = Path(explicit)
-        return p if p.exists() else None
-    for name in ("audiveris", "Audiveris", "audiveris.bat"):
-        w = shutil.which(name)
-        if w:
-            return Path(w)
-    for cand in (Path(r"C:\Program Files\Audiveris\audiveris.bat"),
-                 Path(r"C:\Program Files (x86)\Audiveris\audiveris.bat"),
-                 Path(os.path.expanduser(r"~\Audiveris\audiveris.bat"))):
-        if cand.exists():
-            return cand
-    return None
+    """找 Audiveris：环境变量 → 随产品自带 → 系统安装 → PATH。
+
+    ★ 原来的实现在这里只找 `audiveris.bat`，而官方 Windows 发行版装出来的
+      可执行文件叫 `Audiveris.exe` —— 于是"没指定路径就一定找不到"。
+      现在统一走 `omr_engine/runtime.py`，并把"从哪找到的"也带回来。
+    """
+    from omr_engine import runtime
+    info = runtime.find_audiveris(explicit)
+    return info.path if info else None
 
 
 def cmd_pdf2xml(args):
@@ -268,6 +264,8 @@ def cmd_status(args):
     ]
     for name, p in checks:
         print(f"  {'OK  ' if p.exists() else 'MISS'} {name:<16} {p}")
+    from omr_engine import runtime
+    print("\n  " + runtime.audit_report())
     print("\n  评测请用 --truth 指定开放许可真值（本项目不内置任何厂商输出）:")
     for ln in OPEN_TRUTH_HINT.splitlines():
         print("        " + ln)

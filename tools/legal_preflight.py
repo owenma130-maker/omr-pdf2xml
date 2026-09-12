@@ -57,7 +57,7 @@ BINARY_EXT = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.pdf', '.mp3',
               '.pth', '.pb', '.tflite', '.dll', '.exe', '.so', '.dylib'}
 TEXT_EXT = {'.py', '.md', '.txt', '.json', '.toml', '.cfg', '.ini', '.yml',
             '.yaml', '.csv', '.html', '.js', '.ts', '.vue', '.ps1', '.sh',
-            '.bat', '.xml', ''}
+            '.bat', '.xml', '.spec', '.in', '.editorconfig', ''}
 
 # ★ 这个检查器自己【必须】含有那些词（它们是"要抓的模式"），
 #   否则它没法工作。所以显式豁免自身，并在文件里写明原因 ——

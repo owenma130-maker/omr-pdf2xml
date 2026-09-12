@@ -22,19 +22,10 @@ sys.path.insert(0, str(ROOT))
 
 
 def find_audiveris(explicit: str | None = None):
-    import shutil
-    cands = []
-    if explicit:
-        cands.append(Path(explicit))
-    cands += [Path(r'C:\Program Files\Audiveris\Audiveris.exe'),
-              Path(r'C:\Program Files (x86)\Audiveris\Audiveris.exe'),
-              Path('/Applications/Audiveris.app/Contents/MacOS/Audiveris'),
-              Path('/usr/bin/audiveris'), Path('/usr/local/bin/audiveris')]
-    for c in cands:
-        if c.exists():
-            return c
-    w = shutil.which('audiveris') or shutil.which('Audiveris')
-    return Path(w) if w else None
+    """统一走 omr_engine.runtime（环境变量 → 自带 → 系统 → PATH）。"""
+    from omr_engine import runtime
+    info = runtime.find_audiveris(explicit)
+    return info.path if info else None
 
 
 class App:

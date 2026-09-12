@@ -22,3 +22,7 @@ data/
 .idea/
 .DS_Store
 Thumbs.db
+
+# 自带的 Audiveris（约 163 MB，打包时现取现放，不进 git）
+vendor/audiveris/
+vendor/**/NOTICE.txt
