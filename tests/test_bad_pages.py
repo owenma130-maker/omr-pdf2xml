@@ -163,3 +163,64 @@ def test_pdf2xml_still_fails_when_no_omr_written(tmp_path, monkeypatch):
         pdf=str(pdf), output=str(tmp_path / 'o.musicxml'), verbose=False,
         audiveris='fake'))
     assert rc == 4
+
+
+# ---------------------------------------------------------------------------
+# GUI 的"复用已有 .omr"分支（识别 20 分钟，导出 5 分钟 —— 改了导出逻辑后
+# 不该逼用户重跑识别）。用 stub 测，不依赖 Tk 显示。
+# ---------------------------------------------------------------------------
+class _StubApp:
+    from omr_gui import App as _App
+    _reuse_omr = _App._reuse_omr
+
+    def __init__(self, reuse):
+        self.lines = []
+        self.reuse_var = type('V', (), {'get': lambda s: reuse})()
+
+    def say(self, s):
+        self.lines.append(str(s))
+
+
+def _make_omr(work: Path, name='x.omr'):
+    work.mkdir(parents=True, exist_ok=True)
+    p = work / name
+    with zipfile.ZipFile(p, 'w') as zf:
+        zf.writestr('sheet#1/sheet#1.xml', GOOD)
+    return p
+
+
+def test_gui_reuse_returns_existing_omr(tmp_path):
+    pytest.importorskip('tkinter')
+    work = tmp_path / 'x_omr'
+    omr = _make_omr(work)
+    app = _StubApp(reuse=True)
+    assert app._reuse_omr(work) == omr
+    assert any('复用' in ln for ln in app.lines)
+
+
+def test_gui_reuse_off_never_reuses(tmp_path):
+    pytest.importorskip('tkinter')
+    work = tmp_path / 'x_omr'
+    _make_omr(work)
+    assert _StubApp(reuse=False)._reuse_omr(work) is None
+
+
+def test_gui_reuse_with_no_existing_omr_falls_back(tmp_path):
+    """勾了复用但目录里没有 .omr -> 返回 None，让调用方照常跑识别。"""
+    pytest.importorskip('tkinter')
+    work = tmp_path / 'x_omr'
+    work.mkdir()
+    app = _StubApp(reuse=True)
+    assert app._reuse_omr(work) is None
+    assert any('没找到' in ln for ln in app.lines)
+
+
+def test_gui_reuse_picks_newest_omr(tmp_path):
+    """目录里有多个 .omr 时取最新的那个。"""
+    pytest.importorskip('tkinter')
+    import os
+    work = tmp_path / 'x_omr'
+    old = _make_omr(work, 'old.omr')
+    new = _make_omr(work, 'new.omr')
+    os.utime(old, (1_000_000, 1_000_000))          # 把旧的设成很久以前
+    assert _StubApp(reuse=True)._reuse_omr(work) == new

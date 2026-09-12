@@ -86,6 +86,13 @@ class App:
                                                       pady=(6, 0))
         ttk.Label(top, text='0 = 全部页（测试时填 1 会快很多）').grid(
             row=2, column=1, sticky='w', padx=(80, 0), pady=(6, 0))
+
+        # ★ 复用已有 .omr：Audiveris 识别一本 90 页的谱子要 20 分钟以上，
+        #   而导出只要 5 分钟。改了导出逻辑后想再试一次，没必要重跑识别。
+        self.reuse_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(top, text='复用已有 .omr（跳过识别，只重跑导出）',
+                        variable=self.reuse_var).grid(row=3, column=1,
+                                                      sticky='w', pady=(4, 0))
         top.columnconfigure(1, weight=1)
 
         bar = ttk.Frame(root, padding=(10, 0))
@@ -179,73 +186,99 @@ class App:
         threading.Thread(target=self._work, args=(pdf, full),
                          daemon=True).start()
 
+    def _reuse_omr(self, work: Path):
+        """勾了"复用已有 .omr"且目录里确实有，就返回最新的那个。"""
+        if not self.reuse_var.get():
+            return None
+        cand = sorted(work.rglob('*.omr'),
+                      key=lambda q: q.stat().st_mtime, reverse=True)
+        if not cand:
+            self.say('提示：没找到已有 .omr，还是要跑识别。')
+            return None
+        omr = cand[0]
+        self.say('[1/2] 复用已有 .omr（跳过 Audiveris 识别）')
+        self.say(f'      {omr.name}  {omr.stat().st_size / 1048576:.1f} MB  '
+                 + time.strftime('%Y-%m-%d %H:%M',
+                                 time.localtime(omr.stat().st_mtime)))
+        self.say('      注意：只重跑导出。要改识别参数请取消勾选。')
+        return omr
+
+    def _run_audiveris(self, pdf: Path, work: Path):
+        """跑 Audiveris，返回 .omr 路径；失败返回 None。"""
+        avp = find_audiveris(self.av_var.get().strip() or None)
+        if avp is None:
+            self.say('★ 没有 Audiveris，无法从 PDF 生成 .omr。')
+            return None
+        self.say('[1/2] Audiveris 识别中（这一步最慢，通常 1~3 分钟）')
+        self.phase = 'audiveris'
+        self.say(f'      程序: {avp}')
+        self.say(f'      输出目录: {work}')
+        cmd = [str(avp), '-batch', '-output', str(work),
+               '-export', str(pdf)]
+        try:
+            n = int(self.pages_var.get() or 0)
+        except ValueError:
+            n = 0
+        if n > 0:
+            # Audiveris 的 -sheets 接受 "1 4-5" 这样的写法
+            cmd.insert(1, f'1-{n}')
+            cmd.insert(1, '-sheets')
+            self.say(f'      只处理前 {n} 页（-sheets 1-{n}）')
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, text=True,
+                             errors='replace', bufsize=1,
+                             encoding='utf-8')
+        # ★ 逐行转发 Audiveris 的输出：它自己会报走到哪一步
+        #   （LOAD / BINARY / GRID / HEADS / RHYTHMS / PAGE …）
+        for line in p.stdout:                          # type: ignore
+            line = line.rstrip()
+            if line:
+                self.last_out = time.time()
+                self.say('    ' + line[:160])
+        rc = p.wait()
+        # ★ 先看 .omr，再看 exit code。
+        #   Audiveris 是【逐页增量存盘】的（每识别完一页就写一次 .omr），
+        #   而它的 MusicXML 导出是【整本一次性事务】—— 任何一页失败就
+        #   "Could not export since transcription did not complete
+        #   successfully" 然后 exit 1，连一页的 MusicXML 都不给。
+        #   用户实测：92 页的书里只有 2 页空白/歪斜，等了 22 分钟只看到
+        #   "★ Audiveris 失败 (exit 1)"，90 页好页的成果全被丢掉。
+        omrs = list(work.rglob('*.omr'))
+        if rc != 0:
+            if not omrs:
+                self.say(f'★ Audiveris 失败 (exit {rc})，且没有产出 .omr。')
+                return None
+            self.say(f'⚠ Audiveris 报了错 (exit {rc})，'
+                     f'但 .omr 已逐页存盘。')
+            self.say('  原因通常是某几页空白 / 歪斜 / 分辨率异常。'
+                     '这不影响其余页面，继续导出。')
+            try:
+                from omr_cli import list_empty_sheets
+                bad = list_empty_sheets(omrs[0])
+            except Exception:
+                bad = []
+            if bad:
+                self.say('  读不了的页（会被跳过）: '
+                         + ', '.join(f'第{n}页' for n in bad))
+        if not omrs:
+            self.say('★ Audiveris 没有产出 .omr。')
+            return None
+        omr = omrs[0]
+        self.say(f'      ✔ .omr 已生成: {omr.name}')
+        return omr
+
     def _work(self, pdf: Path, full: bool):
         try:
             from omr_engine import referee
             omr = None
             if full:
-                avp = find_audiveris(self.av_var.get().strip() or None)
-                if avp is None:
-                    self.say('★ 没有 Audiveris，无法从 PDF 生成 .omr。')
-                    return
                 work = pdf.parent / (pdf.stem + '_omr')
                 work.mkdir(parents=True, exist_ok=True)
-                self.say('[1/2] Audiveris 识别中（这一步最慢，通常 1~3 分钟）')
-                self.phase = 'audiveris'
-                self.say(f'      程序: {avp}')
-                self.say(f'      输出目录: {work}')
-                cmd = [str(avp), '-batch', '-output', str(work),
-                       '-export', str(pdf)]
-                try:
-                    n = int(self.pages_var.get() or 0)
-                except ValueError:
-                    n = 0
-                if n > 0:
-                    # Audiveris 的 -sheets 接受 "1 4-5" 这样的写法
-                    cmd.insert(1, f'1-{n}')
-                    cmd.insert(1, '-sheets')
-                    self.say(f'      只处理前 {n} 页（-sheets 1-{n}）')
-                p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                     stderr=subprocess.STDOUT, text=True,
-                                     errors='replace', bufsize=1,
-                                     encoding='utf-8')
-                # ★ 逐行转发 Audiveris 的输出：它自己会报走到哪一步
-                #   （LOAD / BINARY / GRID / HEADS / RHYTHMS / PAGE …）
-                for line in p.stdout:                      # type: ignore
-                    line = line.rstrip()
-                    if line:
-                        self.last_out = time.time()
-                        self.say('    ' + line[:160])
-                rc = p.wait()
-                # ★ 先看 .omr，再看 exit code。
-                #   Audiveris 是【逐页增量存盘】的（每识别完一页就写一次 .omr），
-                #   而它的 MusicXML 导出是【整本一次性事务】—— 任何一页失败就
-                #   "Could not export since transcription did not complete
-                #   successfully" 然后 exit 1，连一页的 MusicXML 都不给。
-                #   用户实测：92 页的书里只有 2 页空白/歪斜，等了 22 分钟只看到
-                #   "★ Audiveris 失败 (exit 1)"，90 页好页的成果全被丢掉。
-                omrs = list(work.rglob('*.omr'))
-                if rc != 0:
-                    if not omrs:
-                        self.say(f'★ Audiveris 失败 (exit {rc})，且没有产出 .omr。')
-                        return
-                    self.say(f'⚠ Audiveris 报了错 (exit {rc})，'
-                             f'但 .omr 已逐页存盘。')
-                    self.say('  原因通常是某几页空白 / 歪斜 / 分辨率异常。'
-                             '这不影响其余页面，继续导出。')
-                    try:
-                        from omr_cli import list_empty_sheets
-                        bad = list_empty_sheets(omrs[0])
-                    except Exception:
-                        bad = []
-                    if bad:
-                        self.say('  读不了的页（会被跳过）: '
-                                 + ', '.join(f'第{n}页' for n in bad))
-                if not omrs:
-                    self.say('★ Audiveris 没有产出 .omr。')
+                omr = self._reuse_omr(work)
+                if omr is None:
+                    omr = self._run_audiveris(pdf, work)
+                if omr is None:
                     return
-                omr = omrs[0]
-                self.say(f'      ✔ .omr 已生成: {omr.name}')
 
             xml = pdf.parent / (pdf.stem + '.musicxml')
             if full and omr is not None:
