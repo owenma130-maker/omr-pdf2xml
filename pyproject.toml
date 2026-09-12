@@ -27,6 +27,7 @@ dev = ["pytest>=7"]
 
 [project.scripts]
 omr = "omr_cli:main"
+omr-gui = "omr_gui:main"
 
 [tool.setuptools]
 py-modules = ["omr_cli"]

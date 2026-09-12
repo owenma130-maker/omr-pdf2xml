@@ -1,0 +1,71 @@
+name: release
+
+# 打 tag（v*）时在 Windows 上构建 exe，并附到 Release 上。
+# 两个产物：omr-pdf2xml.exe（图形界面）与 omr.exe（命令行）。
+#
+# ★ 为什么 exe 在 CI 上构建而不是本地提交：
+#   exe 是几十 MB 的二进制，不该进仓库；而 CI 能保证"从源码可复现地打出来"。
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build-exe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+          pip install pyinstaller
+
+      - name: 测试（打不出好软件就先别打包）
+        run: pytest -q
+
+      - name: 法律预检（零命中才继续）
+        run: python tools/legal_preflight.py --path .
+
+      - name: 打包 exe
+        run: pyinstaller omr-pdf2xml.spec --noconfirm
+
+      - name: 冒烟测试（exe 至少能起来）
+        shell: pwsh
+        run: |
+          .\dist\omr.exe --help
+          .\dist\omr.exe status
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: omr-pdf2xml-windows
+          path: |
+            dist/omr-pdf2xml.exe
+            dist/omr.exe
+
+      - name: 附到 Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/omr-pdf2xml.exe
+            dist/omr.exe
+          body: |
+            ## omr-pdf2xml
+
+            乐谱 PDF → MusicXML，附带一份可以自己复核的成绩单。
+
+            **使用前需要先安装 [Audiveris](https://github.com/Audiveris/audiveris)**
+            —— 识别那一层是它做的（Java 程序），本工具不做替换。
+
+            - `omr-pdf2xml.exe` —— 图形界面，双击运行
+            - `omr.exe` —— 命令行：`omr check / omr2xml / pdf2xml / eval / status`
+
+            详见 README。

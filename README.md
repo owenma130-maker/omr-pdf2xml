@@ -100,6 +100,28 @@ omr pdf2xml 乐谱.pdf -o 输出.musicxml --audiveris "C:\Program Files\Audiveri
 
 ---
 
+## 图形界面 / exe（不想用命令行的话）
+
+```bash
+omr-gui                 # 装了就有这个命令
+python omr_gui.py       # 或者直接跑脚本
+```
+窗口里三件事：**选 PDF → 转换 → 看自检报告**。报告占最大位置，因为那是本工具的差异点。
+
+**打包成 exe：**
+```bash
+pip install pyinstaller
+pyinstaller omr-pdf2xml.spec
+# 产物: dist/omr-pdf2xml.exe（图形界面，双击运行）
+#       dist/omr.exe        （命令行）
+```
+仓库里的 `.github/workflows/release.yml` 会在你打 `v*` tag 时**自动在 Windows 上构建
+这两个 exe 并附到 Release** —— 你不需要自己在本地打包，也不需要把几十 MB 的二进制提交进仓库。
+
+> **★ 装了 exe 也还是需要 Audiveris。**
+> 识别那一层是 Audiveris（Java 程序）做的，本工具的 exe **不包含它** ——
+> 就像别的工具需要你先装 Java 一样。界面里会自动检测常见安装位置，也能手工填路径。
+
 ## 准确性（实测，不是宣传）
 
 | 材料 | 类型 | 结果 |
