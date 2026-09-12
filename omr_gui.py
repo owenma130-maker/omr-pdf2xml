@@ -225,6 +225,16 @@ def main():
     except tk.TclError:
         pass
     App(root)
+    # ★ 启动时把自己提到最前。不这么做窗口会开在浏览器后面，
+    #   用户会以为"点了没反应"。置顶只保持 0.6 秒，之后恢复普通层级，
+    #   免得一直压着别的窗口。
+    try:
+        root.lift()
+        root.attributes('-topmost', True)
+        root.after(600, lambda: root.attributes('-topmost', False))
+        root.focus_force()
+    except tk.TclError:
+        pass
     root.mainloop()
 
 
