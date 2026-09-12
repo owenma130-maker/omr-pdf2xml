@@ -5,6 +5,12 @@ on:
     branches: [main, master]
   pull_request:
 
+env:
+  # ★ 必须：本项目所有输出都是中文。Windows 控制台默认不是 UTF-8，
+  #   不加这两行，日志里会出现 UnicodeEncodeError（或整片乱码）。
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+
 jobs:
   test:
     strategy:
@@ -24,10 +30,19 @@ jobs:
           pip install -e ".[dev]"
       - name: 测试
         run: pytest -q
-      - name: 命令行可用性
+      - name: 命令行可用性（用 python -m，不依赖 Scripts 是否在 PATH）
         run: |
+          python -m omr_cli --help
+          python -m omr_cli status
+      - name: 控制台脚本 omr 的可用性（只诊断，不让它挂掉整轮）
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Write-Host "PATH 里有没有 omr："
+          Get-Command omr -ErrorAction SilentlyContinue | Format-List
+          Write-Host "Scripts 目录内容："
+          python -c "import sysconfig,os;p=sysconfig.get_path('scripts');print(p);print([f for f in os.listdir(p) if 'omr' in f.lower()])"
           omr --help
-          omr status
 
   # 发布前的法律预检：仓库里不得出现任何商业 OMR 软件的逆向产物或派生数据。
   # 规则见 tools/legal_preflight.py（随仓库发布）。
