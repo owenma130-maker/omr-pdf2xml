@@ -4,7 +4,7 @@
 目标导向的三个子命令:
   omr2xml  .omr  -> MusicXML   (结构化导出, 保留小节/声部/休止/小节线)
   pdf2xml  PDF   -> .omr -> MusicXML  (需本机安装 Audiveris)
-  eval     MusicXML 对照 PS 真值做【结构分项】评测
+  eval     MusicXML 对照开放许可真值做【结构分项】评测
   status   打印当前进度 vs 目标
 
 用法:
@@ -117,15 +117,37 @@ def cmd_pdf2xml(args):
         print("         2) 先手工生成 .omr, 再跑: python omr_cli.py omr2xml <file.omr>")
         return 3
 
-    work = ROOT / "results" / "pdf2xml" / pdf.stem
+    # ★ 产物写在【用户 PDF 旁边】，不写在包目录里。
+    #   早期版本写 `ROOT/results/...`，而 ROOT 是包安装目录 ——
+    #   用户一跑就会往 site-packages 里写东西（干净安装实测发现的）。
+    work = pdf.parent / (pdf.stem + "_omr")
     work.mkdir(parents=True, exist_ok=True)
     print(f"[1/2] Audiveris: {av}")
     print(f"      {pdf.name} -> {work}")
     try:
-        subprocess.run([str(av), "-batch", "-output", str(work), "-export", str(pdf)],
-                       check=True)
-    except subprocess.CalledProcessError as e:
-        print(f"[错误] Audiveris 失败 (exit {e.returncode})")
+        r = subprocess.run([str(av), "-batch", "-output", str(work),
+                            "-export", str(pdf)],
+                           capture_output=True, text=True, errors='replace')
+    except OSError as e:
+        print(f"[错误] 无法运行 Audiveris: {e}")
+        return 4
+    if r.returncode != 0:
+        tail = (r.stderr or r.stdout or '')[-800:]
+        # ★ 实测最常见的失败是 Java 堆/页面文件不够，报错信息藏在 Audiveris 的
+        #   原始输出里，用户看不懂。这里把它翻译成一句人话。
+        low = tail.lower()
+        if ('insufficient memory' in low or 'outofmemory' in low
+                or 'commit_memory' in low):
+            print("[错误] Audiveris 内存不足（Java 堆申请失败）。")
+            print("       常见原因：系统页面文件/可用内存太小。可尝试：")
+            print("         · 关掉其它占内存的程序后重跑")
+            print("         · 设置环境变量 JAVA_TOOL_OPTIONS=-Xmx2g 再跑")
+        else:
+            print(f"[错误] Audiveris 失败 (exit {r.returncode})")
+        if tail.strip():
+            print("       Audiveris 最后几行输出：")
+            for ln in tail.strip().splitlines()[-6:]:
+                print(f"         {ln}")
         return 4
 
     omrs = list(work.rglob("*.omr"))
@@ -157,13 +179,13 @@ def cmd_eval(args):
         print(f"[错误] 找不到真值: {truth}")
         return 3
 
-    ps = musicxml_stats(pred)
-    ts = musicxml_stats(truth)
+    pred_stats = musicxml_stats(pred)
+    truth_stats = musicxml_stats(truth)
     pd = type_dist(pred)
     td = type_dist(truth)
 
     print("=" * 88)
-    print("结构分项评测 (对照 PS 真值)")
+    print("结构分项评测 (对照开放许可真值)")
     print("=" * 88)
     print(f"  预测: {pred}")
     print(f"  真值: {truth}")
@@ -171,7 +193,7 @@ def cmd_eval(args):
     print("  " + "-" * 54)
     for k in ("measure", "note", "pitch", "rest", "chord_mark", "barline",
               "voice", "backup", "forward"):
-        a, b = ps[k], ts[k]
+        a, b = pred_stats[k], truth_stats[k]
         if k == "barline":
             # MusicXML 里普通小节线是隐式的; <barline> 只用于特殊/显式标注。
             # 输出更多显式小节线是合法的, 不构成错误, 故不给"达成率"。
@@ -270,7 +292,7 @@ def main():
     p2.add_argument("-q", "--quiet", dest="verbose", action="store_false", default=True)
     p2.set_defaults(func=cmd_pdf2xml)
 
-    p3 = sub.add_parser("eval", help="结构分项评测 (对照 PS 真值)")
+    p3 = sub.add_parser("eval", help="结构分项评测 (对照开放许可真值)")
     p3.add_argument("pred")
     p3.add_argument("--truth")
     p3.set_defaults(func=cmd_eval)
