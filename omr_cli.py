@@ -99,6 +99,39 @@ def find_audiveris(explicit=None):
     return info.path if info else None
 
 
+_SHEET_XML_RE = re.compile(r'^sheet#(\d+)/sheet#\1\.xml$')
+
+
+def list_empty_sheets(omr):
+    """返回 .omr 里【没有 <page>】的页码。
+
+    Audiveris 判定无效的页（空白页/纯文字页/倾角过大）在 .omr 里被存成一个
+    0 字节的 sheet#N.xml。这是"整本导出失败"的根因：Audiveris 的导出是一次性
+    事务，任何一页失败就 exit 1，结果 90 页好页的 MusicXML 一个都不给。
+    但我们自己的导出器可以逐页跳过，所以先把这些页码找出来告诉用户。
+    """
+    bad = []
+    import xml.etree.ElementTree as ET
+    import zipfile
+
+    try:
+        with zipfile.ZipFile(omr) as zf:
+            for n in zf.namelist():
+                m = _SHEET_XML_RE.match(n)
+                if not m:
+                    continue
+                try:
+                    root = ET.fromstring(zf.read(n).decode('utf-8', errors='ignore'))
+                except ET.ParseError:
+                    bad.append(int(m.group(1)))
+                    continue
+                if root.find('page') is None:
+                    bad.append(int(m.group(1)))
+    except (zipfile.BadZipFile, OSError):
+        return []
+    return sorted(bad)
+
+
 def cmd_pdf2xml(args):
     pdf = Path(args.pdf)
     if not pdf.exists():
@@ -127,33 +160,51 @@ def cmd_pdf2xml(args):
     except OSError as e:
         print(f"[错误] 无法运行 Audiveris: {e}")
         return 4
+    # ★ 关键：先看 .omr，再看 exit code。
+    #   Audiveris 是【逐页增量存盘】的：每识别完一页就写一次 .omr。而它的
+    #   MusicXML 导出是【整本一次性事务】—— 任何一页失败就
+    #   "Could not export since transcription did not complete successfully"
+    #   然后 exit 1，连一页的 MusicXML 都不给。实测 92 页的书里只有 2 页
+    #   空白/歪斜，90 页好页的成果差点被全部丢掉。
+    #   所以：只要 .omr 在，就继续用我们自己的导出器跑（它会跳过坏页）。
+    omrs = list(work.rglob("*.omr"))
     if r.returncode != 0:
         tail = (r.stderr or r.stdout or '')[-800:]
-        # ★ 实测最常见的失败是 Java 堆/页面文件不够，报错信息藏在 Audiveris 的
-        #   原始输出里，用户看不懂。这里把它翻译成一句人话。
-        low = tail.lower()
-        if ('insufficient memory' in low or 'outofmemory' in low
-                or 'commit_memory' in low):
-            print("[错误] Audiveris 内存不足（Java 堆申请失败）。")
-            print("       常见原因：系统页面文件/可用内存太小。可尝试：")
-            print("         · 关掉其它占内存的程序后重跑")
-            print("         · 设置环境变量 JAVA_TOOL_OPTIONS=-Xmx2g 再跑")
-        else:
-            print(f"[错误] Audiveris 失败 (exit {r.returncode})")
-        if tail.strip():
-            print("       Audiveris 最后几行输出：")
-            for ln in tail.strip().splitlines()[-6:]:
-                print(f"         {ln}")
-        return 4
+        if not omrs:
+            # ★ 实测最常见的失败是 Java 堆/页面文件不够，报错信息藏在 Audiveris
+            #   的原始输出里，用户看不懂。这里把它翻译成一句人话。
+            low = tail.lower()
+            if ('insufficient memory' in low or 'outofmemory' in low
+                    or 'commit_memory' in low):
+                print("[错误] Audiveris 内存不足（Java 堆申请失败）。")
+                print("       常见原因：系统页面文件/可用内存太小。可尝试：")
+                print("         · 关掉其它占内存的程序后重跑")
+                print("         · 设置环境变量 JAVA_TOOL_OPTIONS=-Xmx2g 再跑")
+            else:
+                print(f"[错误] Audiveris 失败 (exit {r.returncode})")
+            if tail.strip():
+                print("       Audiveris 最后几行输出：")
+                for ln in tail.strip().splitlines()[-6:]:
+                    print(f"         {ln}")
+            return 4
+        print(f"[提示] Audiveris 报了错 (exit {r.returncode})，但 .omr 已逐页存盘。")
+        print("       原因通常是某几页空白 / 歪斜 / 分辨率异常 —— Audiveris 的")
+        print("       整本导出是一次性事务，一页坏就整本不导出。这不影响其余页面。")
+        bad = list_empty_sheets(omrs[0])
+        if bad:
+            print(f"       读不了的页（会被跳过）: {', '.join(f'第{n}页' for n in bad)}")
+        print("       继续用已识别的页面导出。")
 
-    omrs = list(work.rglob("*.omr"))
     if not omrs:
         print(f"[错误] Audiveris 未产出 .omr, 请检查 {work}")
         return 5
     omr = omrs[0]
     print(f"[2/2] 结构化导出 <- {omr.name}")
-    return cmd_omr2xml(argparse.Namespace(omr=str(omr), output=args.output,
-                                          verbose=args.verbose))
+    rc = cmd_omr2xml(argparse.Namespace(omr=str(omr), output=args.output,
+                                        verbose=args.verbose))
+    if rc == 0 and r.returncode != 0:
+        print("[完成] 注意：源 PDF 有个别页面无法识别，产物只包含其余页面。")
+    return rc
 
 
 # ----------------------------------------------------------------------

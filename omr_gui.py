@@ -54,6 +54,10 @@ class App:
         self.busy = False
         self.t0 = time.time()
         self.last_out = time.time()
+        # 当前阶段。心跳要按阶段说实话 —— 原来不管在哪一步都说
+        # "Audiveris 在算"，而导出一本 92 页的谱子要跑 5 分钟，
+        # Audiveris 那时早就退出了，用户看久了会以为卡死。
+        self.phase = ''
 
         top = ttk.Frame(root, padding=10)
         top.pack(fill='x')
@@ -187,6 +191,7 @@ class App:
                 work = pdf.parent / (pdf.stem + '_omr')
                 work.mkdir(parents=True, exist_ok=True)
                 self.say('[1/2] Audiveris 识别中（这一步最慢，通常 1~3 分钟）')
+                self.phase = 'audiveris'
                 self.say(f'      程序: {avp}')
                 self.say(f'      输出目录: {work}')
                 cmd = [str(avp), '-batch', '-output', str(work),
@@ -212,10 +217,30 @@ class App:
                         self.last_out = time.time()
                         self.say('    ' + line[:160])
                 rc = p.wait()
-                if rc != 0:
-                    self.say(f'★ Audiveris 失败 (exit {rc})')
-                    return
+                # ★ 先看 .omr，再看 exit code。
+                #   Audiveris 是【逐页增量存盘】的（每识别完一页就写一次 .omr），
+                #   而它的 MusicXML 导出是【整本一次性事务】—— 任何一页失败就
+                #   "Could not export since transcription did not complete
+                #   successfully" 然后 exit 1，连一页的 MusicXML 都不给。
+                #   用户实测：92 页的书里只有 2 页空白/歪斜，等了 22 分钟只看到
+                #   "★ Audiveris 失败 (exit 1)"，90 页好页的成果全被丢掉。
                 omrs = list(work.rglob('*.omr'))
+                if rc != 0:
+                    if not omrs:
+                        self.say(f'★ Audiveris 失败 (exit {rc})，且没有产出 .omr。')
+                        return
+                    self.say(f'⚠ Audiveris 报了错 (exit {rc})，'
+                             f'但 .omr 已逐页存盘。')
+                    self.say('  原因通常是某几页空白 / 歪斜 / 分辨率异常。'
+                             '这不影响其余页面，继续导出。')
+                    try:
+                        from omr_cli import list_empty_sheets
+                        bad = list_empty_sheets(omrs[0])
+                    except Exception:
+                        bad = []
+                    if bad:
+                        self.say('  读不了的页（会被跳过）: '
+                                 + ', '.join(f'第{n}页' for n in bad))
                 if not omrs:
                     self.say('★ Audiveris 没有产出 .omr。')
                     return
@@ -225,6 +250,8 @@ class App:
             xml = pdf.parent / (pdf.stem + '.musicxml')
             if full and omr is not None:
                 self.say('[2/2] 结构化导出 → MusicXML')
+                self.phase = 'export'
+                self.last_out = time.time()
                 from omr_engine.fusion.omr_structural_export import (
                     export_structural_musicxml)
                 export_structural_musicxml(omr, xml, verbose=False,
@@ -265,10 +292,18 @@ class App:
         # 心跳：长时间没有新输出就报一声，让用户知道"还在跑、不是卡死"
         if self.busy and time.time() - self.last_out > 12:
             self.last_out = time.time()
+            if self.phase == 'export':
+                # 导出阶段没有逐行输出可转发，必须明说还要多久，
+                # 否则用户会以为程序卡死（92 页实测约 5 分钟）。
+                msg = ' …仍在导出 MusicXML（这一步按页数算，大谱子要几分钟）\n'
+            elif self.phase == 'audiveris':
+                msg = ' …仍在识别（Audiveris 在算，没有新输出是正常的）\n'
+            else:
+                msg = ' …仍在运行\n'
             self.txt.insert(
                 'end',
                 f'[{time.strftime("%M:%S", time.gmtime(time.time() - self.t0))}]'
-                ' …仍在运行（Audiveris 在算，没有新输出）\n')
+                + msg)
             self.txt.see('end')
         self.root.after(100, self.drain)
 

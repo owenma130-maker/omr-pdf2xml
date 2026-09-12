@@ -80,12 +80,10 @@ import xml.etree.ElementTree as ET
 try:  # optional: only needed for the notehead fill-ratio measurement
     import numpy as _np
     from PIL import Image as _Image
-    from PIL import ImageFilter as _ImageFilter
     _IMAGE_OK = True
 except Exception:  # pragma: no cover
     _np = None
     _Image = None
-    _ImageFilter = None
     _IMAGE_OK = False
 
 # ---------------------------------------------------------------------------
@@ -147,6 +145,26 @@ CLEF_KIND_TO_SIGN = {
 
 _SHEET_RE = re.compile(r'^sheet#(\d+)/sheet#\1\.xml$')
 
+
+def read_sheet_root(zf, name):
+    """读一页的 ``sheet#N.xml`` 并解析；读不了/解析不了就返回 ``None``。
+
+    Audiveris 判为无效的页（空白页、歪斜页、纯文字页）不会写出 ``<page>``，
+    极端情况下还可能留下一个被截断甚至 0 字节的 XML。**一页坏不能拖垮整本**：
+    调用方拿到 ``None`` 就跳过这一页。这条规则是有真实代价教训的 ——
+    一本 92 页的谱子里 2 页无效，就足以让 Audiveris 的整本导出 exit 1、
+    90 页好页的 MusicXML 一个都不给。
+    """
+    try:
+        raw = zf.read(name)
+    except KeyError:
+        return None
+    try:
+        return ET.fromstring(raw.decode('utf-8', errors='ignore'))
+    except ET.ParseError:
+        return None
+
+
 # voice used for chord objects that no measure > voice > slots > entry references
 DEFAULT_VOICE = '1'
 
@@ -188,10 +206,20 @@ def _measure_fill_ratios(omr_path):
             if png_name not in names:
                 diag['fill_reason'] = f'{png_name} missing'
                 continue
-            img = _np.array(_Image.open(
-                io.BytesIO(zf.read(png_name))).convert('L'))
+            # ★ 读不了的 BINARY.png 必须和"缺图"一样跳过。原来这里没有保护：
+            #   .omr 里只要有一页图片损坏/被截断，整本导出就抛
+            #   UnidentifiedImageError 直接崩掉（_sheet_ink 那边是保护了的）。
+            try:
+                img = _np.array(_Image.open(
+                    io.BytesIO(zf.read(png_name))).convert('L'))
+            except Exception:
+                diag['fill_reason'] = f'{png_name} unreadable'
+                continue
             H, W = img.shape
-            root = ET.fromstring(zf.read(name).decode('utf-8', errors='ignore'))
+            root = read_sheet_root(zf, name)
+            if root is None:
+                diag['fill_reason'] = f'{name} unparseable'
+                continue
             for head in root.iter('head'):
                 b = head.find('bounds')
                 if b is None:
@@ -462,6 +490,24 @@ def _sheet_ink(zf, sheet_key):
     return _np.asarray(img) < 128
 
 
+def _dilate(mask, tol):
+    """``mask`` 的 (2*tol+1) 方形膨胀，用可分离的 1-D 最大值实现。
+
+    原来用的是 PIL 的 ``MaxFilter``：整页 3456x4962 = 1700 万像素、7x7 窗口，
+    单次调用本身就很贵；而去重循环对【每一对】页面都要重算一次 ``b`` 的膨胀
+    （92 页 -> 约 4200 对 -> 8000+ 次全页膨胀），实测让一本 92 页的谱子导出
+    跑了 12 分钟以上、内存冲到 5.8 GB。这里改成先横向后纵向的取最大值，
+    整页操作次数从 49 降到 6，且不再依赖 PIL。
+    """
+    out = mask
+    for axis in (0, 1):
+        acc = out
+        for k in range(1, tol + 1):
+            acc = acc | _np.roll(out, k, axis=axis) | _np.roll(out, -k, axis=axis)
+        out = acc
+    return out
+
+
 def _ink_overlap(a, b, tol=3):
     """Fraction of ``a``'s ink lying within ``tol`` px of ``b``'s ink.
 
@@ -474,11 +520,17 @@ def _ink_overlap(a, b, tol=3):
     na = int(a.sum())
     if na == 0:
         return 0.0
-    size = 2 * tol + 1
-    bd = _np.asarray(
-        _Image.fromarray((b * 255).astype('uint8'))
-        .filter(_ImageFilter.MaxFilter(size))) > 0
+    bd = _dilate(b, tol)
     return float((a & bd).sum()) / float(na)
+
+
+# 去重只和前 WINDOW 页比。原先是全对全（O(n^2)）：一本 92 页的谱子有 4186
+# 个页对，每对要做 2 次整页膨胀 + 整页 AND，实测导出卡 12 分钟以上、内存冲到
+# 5.8 GB —— 而这本书里一个重复页都没有。重复页在真实 PDF 里都是【局部】现象
+# （同一页被重复插入、装订错页），所以只和前面 32 页比既保住了已知用例
+# （彩虹谱 3 页，第 1、3 页重复），又把成本压到 O(n*32)。
+# 已知边界：相隔超过 32 页的重复页不会被发现 —— 相比卡死 12 分钟，这是划算的。
+DEDUP_WINDOW = 32
 
 
 # ---------------------------------------------------------------------------
@@ -2592,7 +2644,9 @@ def export_structural_musicxml(omr_path, out_path=None, *, verbose=True,
         # models are built because the printed-name index shifts with it.
         part_staves = {}
         for name in sheet_names:
-            _r = ET.fromstring(zf.read(name).decode('utf-8', errors='ignore'))
+            _r = read_sheet_root(zf, name)
+            if _r is None:
+                continue
             _pg = _r.find('page')
             if _pg is None:
                 continue
@@ -2607,9 +2661,21 @@ def export_structural_musicxml(omr_path, out_path=None, *, verbose=True,
                 for _pj, _pe in enumerate(_s.findall('part')):
                     part_staves[_pj] = max(part_staves.get(_pj, 1),
                                            max(1, len(_pe.findall('staff'))))
+        skipped_empty = []
         for idx, name in enumerate(sheet_names):
-            root = ET.fromstring(zf.read(name).decode('utf-8', errors='ignore'))
+            root = read_sheet_root(zf, name)
+            if root is None:
+                skipped_empty.append(idx + 1)
+                continue
             base = _SheetModel(idx, root)
+            if base.page is None or not base.page.findall('system'):
+                # Audiveris 判为无效的页（空白页/纯文字页/倾角过大）在 .omr 里
+                # 是一个 0 字节的 sheet#N.xml —— 没有 <page>，也没有 system。
+                # 这种页必须整页跳过：当空模型塞进 models 会让下游把它当成
+                # "一页没有音符的乐谱"处理，而且它是 Audiveris 整本导出失败的
+                # 元凶（一页坏 -> 全书 exit 1，好页的 MusicXML 一个都不给）。
+                skipped_empty.append(idx + 1)
+                continue
             key = name.split('/')[0]
             npart = 0
             if base.page is not None:
@@ -2633,6 +2699,12 @@ def export_structural_musicxml(omr_path, out_path=None, *, verbose=True,
             part_of[id(base)] = 0
             stats['sheets'] += 1
         stats['multipart_parts'] = n_parts_total
+        stats['skipped_empty_sheets'] = skipped_empty
+        if skipped_empty:
+            warnings.append(
+                'skipped %d page(s) Audiveris could not read (blank/skewed): %s'
+                % (len(skipped_empty),
+                   ', '.join('p%d' % n for n in skipped_empty)))
 
     # ---- drop pages the source PDF repeats verbatim ----------------------
     # The rainbow part is 3 PDF pages but pages 1 and 3 are the same music
@@ -2650,8 +2722,13 @@ def export_structural_musicxml(omr_path, out_path=None, *, verbose=True,
                 continue
             ink = _sheet_ink(zf, key)
             dup = None
-            for prev, pkey, pink, psig in seen:
+            # ★ 只和前面 DEDUP_WINDOW 页比（见该常量的说明）。全对全在 92 页的
+            #   谱子上要跑 12 分钟以上，而重复页实际都是局部现象。
+            for prev, pkey, pink, psig in seen[-DEDUP_WINDOW:]:
                 if ink is not None and pink is not None:
+                    # 尺寸不同 -> 不可能是同一页（同时也省掉一次整页膨胀）
+                    if ink.shape != pink.shape:
+                        continue
                     fwd = _ink_overlap(ink, pink)
                     same = fwd >= 0.97 and _ink_overlap(pink, ink) >= 0.97
                 else:
@@ -2673,6 +2750,7 @@ def export_structural_musicxml(omr_path, out_path=None, *, verbose=True,
             seen.append((model, key, ink, _sheet_signature(model)))
             kept.append(model)
     models = kept
+    stats['dedup_window'] = DEDUP_WINDOW
 
     # ★ `no_sidecars=True` -> ignore EVERY sidecar.  Every default sidecar in
     # `results/` was built for `data/new_score3/score3.omr` (instrument names,
