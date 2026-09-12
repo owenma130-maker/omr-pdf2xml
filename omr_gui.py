@@ -202,7 +202,23 @@ class App:
         self.root.after(120, self.drain)
 
 
+def _force_utf8_stdio():
+    """把 stdout/stderr 强制成 UTF-8（出错时用替换字符，不抛异常）。
+
+    为什么必须由程序自己做：本项目所有输出都是中文，而 Windows 控制台
+    默认是 cp936/cp1252。打包成 exe 后，靠 PYTHONIOENCODING 环境变量
+    并不可靠（实测 CI 里设了仍然崩），所以启动时自己改。
+    """
+    import sys as _sys
+    for _s in (_sys.stdout, _sys.stderr):
+        try:
+            _s.reconfigure(encoding='utf-8', errors='replace')
+        except Exception:
+            pass
+
+
 def main():
+    _force_utf8_stdio()
     root = tk.Tk()
     try:
         ttk.Style().theme_use('vista')
