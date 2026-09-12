@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "omr-pdf2xml"
+version = "0.1.0"
+description = "乐谱 PDF → MusicXML，自带独立裁判（自检报告）的开源 OMR 前端"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "AGPL-3.0-or-later" }
+authors = [{ name = "OMR Project contributors" }]
+keywords = ["omr", "music", "musicxml", "pdf", "sheet-music", "audiveris"]
+classifiers = [
+  "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+  "Programming Language :: Python :: 3",
+  "Topic :: Multimedia :: Sound/Audio :: Conversion",
+]
+# 运行期依赖：核心只依赖 PyMuPDF（读 PDF 文本层/矢量图形来当裁判）。
+# ★ PyMuPDF 是 AGPL-3.0，与本项目许可一致；若要改成闭源发行，需换成
+#   pdfminer.six(MIT) + 自研矢量解析。
+dependencies = ["PyMuPDF>=1.23"]
+
+[project.optional-dependencies]
+# 完整管线（PDF 直出 MusicXML）还需要外部的 Audiveris 可执行文件，见 README。
+dev = ["pytest>=7"]
+
+[project.scripts]
+omr = "omr_cli:main"
+
+[tool.setuptools]
+py-modules = ["omr_cli"]
+packages = ["omr_engine"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

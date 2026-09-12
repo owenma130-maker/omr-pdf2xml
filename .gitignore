@@ -1,0 +1,24 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+
+# 输入/输出（用户自己的乐谱与结果，不进仓库）
+*.pdf
+*.omr
+*.mxl
+*.musicxml
+*.png
+*.jpg
+results/
+data/
+
+# 编辑器/系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
