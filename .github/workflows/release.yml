@@ -49,18 +49,31 @@ jobs:
       - name: 取官方 Audiveris（Windows 发行版）
         shell: pwsh
         run: |
+          # ★ 实测：Audiveris 的 Windows 资产是 **.msi**，不是 .zip
+          #   （5.11.0 的资产只有 dmg / deb / msi / pdf / zip(仅 schema 文档)）
+          #   -> 用 msiexec /a 做"管理安装"= 只解包不真正安装，不需要管理员权限
           $api = "https://api.github.com/repos/Audiveris/audiveris/releases/latest"
           $rel = Invoke-RestMethod -Uri $api -Headers @{ 'User-Agent' = 'ci' }
           $asset = $rel.assets |
-            Where-Object { $_.name -match 'windows' -and $_.name -match '\.zip$' } |
+            Where-Object { $_.name -match 'windows.*x86_64\.msi$' } |
             Select-Object -First 1
-          if (-not $asset) { throw "在 Audiveris 最新 release 里找不到 Windows zip" }
-          Write-Host "取到: $($asset.name)  ($($rel.tag_name))"
-          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile aud.zip
-          Expand-Archive aud.zip -DestinationPath aud -Force
-          $exe = Get-ChildItem aud -Recurse -Filter Audiveris.exe |
+          if (-not $asset) {
+            Write-Host "现有资产："; $rel.assets | ForEach-Object { Write-Host "  $($_.name)" }
+            throw "在 Audiveris 最新 release 里找不到 Windows 的 .msi"
+          }
+          Write-Host "取到: $($asset.name)  ($($rel.tag_name), $([int]($asset.size/1MB)) MB)"
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile aud.msi
+          $dst = Join-Path $PWD 'aud'
+          Start-Process msiexec.exe -Wait -ArgumentList @(
+            '/a', "`"$PWD\aud.msi`"", '/qn', "TARGETDIR=`"$dst`"")
+          $exe = Get-ChildItem $dst -Recurse -Filter Audiveris.exe |
                  Select-Object -First 1
-          if (-not $exe) { throw "解出来的包里没有 Audiveris.exe" }
+          if (-not $exe) {
+            Write-Host "解出来的目录树："
+            Get-ChildItem $dst -Recurse -Depth 2 | Select-Object -First 20 FullName
+            throw "解出来的包里没有 Audiveris.exe"
+          }
+          Write-Host "Audiveris 解包到: $($exe.Directory.FullName)"
           "AUDIVERIS_DIR=$($exe.Directory.FullName)" | Out-File -Append $env:GITHUB_ENV
 
       - name: 把 Audiveris 放进产品里
