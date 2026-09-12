@@ -71,6 +71,17 @@ class App:
             row=1, column=1, sticky='we', padx=4, pady=(6, 0))
         ttk.Button(top, text='自动检测', command=self.detect_av).grid(
             row=1, column=2, pady=(6, 0))
+
+        # ★ 只处理前 N 页：Audiveris 是分钟级的，测试时没必要每次跑整本。
+        ttk.Label(top, text='只处理前 N 页：').grid(row=2, column=0, sticky='w',
+                                                   pady=(6, 0))
+        self.pages_var = tk.StringVar(value='0')
+        ttk.Spinbox(top, from_=0, to=999, width=6,
+                    textvariable=self.pages_var).grid(row=2, column=1,
+                                                      sticky='w', padx=4,
+                                                      pady=(6, 0))
+        ttk.Label(top, text='0 = 全部页（测试时填 1 会快很多）').grid(
+            row=2, column=1, sticky='w', padx=(80, 0), pady=(6, 0))
         top.columnconfigure(1, weight=1)
 
         bar = ttk.Frame(root, padding=(10, 0))
@@ -180,6 +191,15 @@ class App:
                 self.say(f'      输出目录: {work}')
                 cmd = [str(avp), '-batch', '-output', str(work),
                        '-export', str(pdf)]
+                try:
+                    n = int(self.pages_var.get() or 0)
+                except ValueError:
+                    n = 0
+                if n > 0:
+                    # Audiveris 的 -sheets 接受 "1 4-5" 这样的写法
+                    cmd.insert(1, f'1-{n}')
+                    cmd.insert(1, '-sheets')
+                    self.say(f'      只处理前 {n} 页（-sheets 1-{n}）')
                 p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, text=True,
                                      errors='replace', bufsize=1,
