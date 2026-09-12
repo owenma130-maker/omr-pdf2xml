@@ -26,3 +26,9 @@ Thumbs.db
 # 自带的 Audiveris（约 163 MB，打包时现取现放，不进 git）
 vendor/audiveris/
 vendor/**/NOTICE.txt
+
+# JVM/Audiveris 崩溃日志（失败时会写到当前目录）
+hs_err_pid*.log
+replay_pid*.log
+*.log
+

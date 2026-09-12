@@ -1,18 +1,27 @@
 name: release
 
-# 打 tag（v*）时在 Windows 上构建 exe，并附到 Release 上。
-# 两个产物：omr-pdf2xml.exe（图形界面）与 omr.exe（命令行）。
+# 打 tag（v*）时在 Windows 上构建【自带 Audiveris】的发行包，并附到 Release。
 #
-# ★ 为什么 exe 在 CI 上构建而不是本地提交：
-#   exe 是几十 MB 的二进制，不该进仓库；而 CI 能保证"从源码可复现地打出来"。
+# 产物：omr-pdf2xml-<版本>-windows-x64.zip
+#   omr-pdf2xml.exe                 图形界面
+#   omr.exe                         命令行
+#   _internal/vendor/audiveris/...  自带的 Audiveris（含它自己的 JRE）
+#
+# ★ 为什么 exe 在 CI 上构建而不是提交进仓库：
+#   一是几十上百 MB 的二进制不该进 git；二是这样"从源码可复现地打出来"。
+# ★ 为什么必须自带 Audiveris：它没有插件接口，只能当外部程序调用 ——
+#   既然只能调用，那就随产品发，用户不必先装一个 Java 程序。
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  build-exe:
+  build:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -27,45 +36,78 @@ jobs:
           pip install -e .
           pip install pyinstaller
 
-      - name: 测试（打不出好软件就先别打包）
+      - name: 测试
         run: pytest -q
 
       - name: 法律预检（零命中才继续）
         run: python tools/legal_preflight.py --path .
 
-      - name: 打包 exe
-        run: pyinstaller omr-pdf2xml.spec --noconfirm
-
-      - name: 冒烟测试（exe 至少能起来）
+      - name: 取官方 Audiveris（Windows 发行版）
         shell: pwsh
         run: |
-          .\dist\omr.exe --help
-          .\dist\omr.exe status
+          $api = "https://api.github.com/repos/Audiveris/audiveris/releases/latest"
+          $rel = Invoke-RestMethod -Uri $api -Headers @{ 'User-Agent' = 'ci' }
+          $asset = $rel.assets |
+            Where-Object { $_.name -match 'windows' -and $_.name -match '\.zip$' } |
+            Select-Object -First 1
+          if (-not $asset) { throw "在 Audiveris 最新 release 里找不到 Windows zip" }
+          Write-Host "取到: $($asset.name)  ($($rel.tag_name))"
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile aud.zip
+          Expand-Archive aud.zip -DestinationPath aud -Force
+          $exe = Get-ChildItem aud -Recurse -Filter Audiveris.exe |
+                 Select-Object -First 1
+          if (-not $exe) { throw "解出来的包里没有 Audiveris.exe" }
+          "AUDIVERIS_DIR=$($exe.Directory.FullName)" | Out-File -Append $env:GITHUB_ENV
+
+      - name: 把 Audiveris 放进产品里
+        run: python tools/bundle_audiveris.py --from "${{ env.AUDIVERIS_DIR }}"
+
+      - name: 打包
+        run: pyinstaller omr-pdf2xml.spec --noconfirm
+
+      - name: 冒烟测试（发行包里至少命令行能起来）
+        shell: pwsh
+        run: |
+          .\dist\omr-pdf2xml\omr.exe --help
+          .\dist\omr-pdf2xml\omr.exe status
+          if (-not (Test-Path .\dist\omr-pdf2xml\_internal\vendor\audiveris\Audiveris.exe)) {
+            throw "发行包里没有自带的 Audiveris"
+          }
+
+      - name: 压缩发行包
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          if (-not $tag) { $tag = "dev" }
+          Compress-Archive -Path .\dist\omr-pdf2xml\* `
+            -DestinationPath "omr-pdf2xml-$tag-windows-x64.zip"
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: omr-pdf2xml-windows
-          path: |
-            dist/omr-pdf2xml.exe
-            dist/omr.exe
+          name: omr-pdf2xml-windows-x64
+          path: omr-pdf2xml-*-windows-x64.zip
 
       - name: 附到 Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/omr-pdf2xml.exe
-            dist/omr.exe
+          files: omr-pdf2xml-*-windows-x64.zip
           body: |
             ## omr-pdf2xml
 
-            乐谱 PDF → MusicXML，附带一份可以自己复核的成绩单。
+            乐谱 PDF → MusicXML，**附带一份可以自己复核的成绩单**。
 
-            **使用前需要先安装 [Audiveris](https://github.com/Audiveris/audiveris)**
-            —— 识别那一层是它做的（Java 程序），本工具不做替换。
+            下载 `omr-pdf2xml-*-windows-x64.zip`，解压后双击 `omr-pdf2xml.exe`。
+            **不需要另装 Audiveris** —— 发行包自带（含它需要的 Java 运行时）。
 
-            - `omr-pdf2xml.exe` —— 图形界面，双击运行
-            - `omr.exe` —— 命令行：`omr check / omr2xml / pdf2xml / eval / status`
+            ### 这个版本能做什么
+            - 单声部扫描件：**86 小节 / 326 音符 / 260 音高**（干净安装实测，丢音符 0）
+            - 数字 PDF 的总谱：**小节数与纸面印刷号逐页对齐**
+            - `omr check` 出一份**自检报告**：纸面印的小节号 vs 我们输出的号，逐行对照
 
-            详见 README。
+            ### 许可
+            - 本项目：**AGPL-3.0-or-later**
+            - 发行包内含 **Audiveris 5.11.0**（AGPL-3.0，原样再分发，未修改）
+              源码：https://github.com/Audiveris/audiveris
+              完整对应源码 = 本仓库 + 上述上游仓库。
