@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """omr-pdf2xml 图形界面（Tkinter，只用标准库，方便打包成 exe）。
 
-为什么要有它：命令行对做音乐的人不友好。这个窗口只做三件事 ——
-  选 PDF → 跑 → 把【自检报告】和 MusicXML 一起给你。
-
-界面刻意保持极简：识别那一层是 Audiveris（外部程序），
-本工具的差异点是**自检报告**，所以报告占最大的位置。
+设计原则（都是被真实使用逼出来的）：
+  1. **每一步都要说话**：识别那一步是分钟级的，界面不能长时间不动，
+     否则用户以为卡死了。
+  2. **日志要能整段复制**：出问题时用户要能把"卡在哪"直接贴给别人。
+     所以有「复制日志」按钮，且每行带 [分:秒] 时间戳。
+  3. **看到什么就是什么**：Audiveris 自己的输出也实时转进来，不藏。
 """
 from __future__ import annotations
 
@@ -13,12 +14,28 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
+
+
+def _force_utf8_stdio():
+    """把 stdout/stderr 强制成 UTF-8（出错时用替换字符，不抛异常）。
+
+    本项目所有输出都是中文，而 Windows 控制台默认是 cp936/cp1252。
+    打包成 exe 后靠 PYTHONIOENCODING 并不可靠（实测 CI 设了仍崩），
+    所以启动时自己改。
+    """
+    import sys as _sys
+    for _s in (_sys.stdout, _sys.stderr):
+        try:
+            _s.reconfigure(encoding='utf-8', errors='replace')
+        except Exception:
+            pass
 
 
 def find_audiveris(explicit: str | None = None):
@@ -32,23 +49,25 @@ class App:
     def __init__(self, root: tk.Tk):
         self.root = root
         root.title('omr-pdf2xml v0.1 —— 乐谱 PDF → MusicXML（带自检报告）')
-        root.geometry('980x680')
+        root.geometry('1000x700')
         self.q: queue.Queue = queue.Queue()
         self.busy = False
+        self.t0 = time.time()
+        self.last_out = time.time()
 
         top = ttk.Frame(root, padding=10)
         top.pack(fill='x')
 
         ttk.Label(top, text='乐谱 PDF：').grid(row=0, column=0, sticky='w')
         self.pdf_var = tk.StringVar()
-        ttk.Entry(top, textvariable=self.pdf_var, width=74).grid(
+        ttk.Entry(top, textvariable=self.pdf_var, width=76).grid(
             row=0, column=1, sticky='we', padx=4)
         ttk.Button(top, text='选择…', command=self.pick_pdf).grid(row=0, column=2)
 
         ttk.Label(top, text='Audiveris：').grid(row=1, column=0, sticky='w',
                                                 pady=(6, 0))
         self.av_var = tk.StringVar()
-        ttk.Entry(top, textvariable=self.av_var, width=74).grid(
+        ttk.Entry(top, textvariable=self.av_var, width=76).grid(
             row=1, column=1, sticky='we', padx=4, pady=(6, 0))
         ttk.Button(top, text='自动检测', command=self.detect_av).grid(
             row=1, column=2, pady=(6, 0))
@@ -64,6 +83,8 @@ class App:
         self.btn_check.pack(side='left', padx=6)
         ttk.Button(bar, text='另存 MusicXML…',
                    command=self.save_xml).pack(side='left', padx=6)
+        ttk.Button(bar, text='复制日志',
+                   command=self.copy_log).pack(side='left', padx=6)
         ttk.Button(bar, text='清空', command=self.clear).pack(side='left')
 
         self.status = tk.StringVar(value='就绪')
@@ -82,7 +103,7 @@ class App:
 
         self.last_xml: Path | None = None
         self.detect_av()
-        self.root.after(120, self.drain)
+        self.root.after(100, self.drain)
 
     # ---------------- 基本交互 ----------------
     def pick_pdf(self):
@@ -97,22 +118,28 @@ class App:
             self.av_var.set(str(av))
             self.say(f'找到 Audiveris: {av}')
         else:
-            self.say('★ 没找到 Audiveris。PDF→.omr 这一步是它做的，'
-                     '请先安装，或点"自动检测"旁边的输入框手工填写路径。')
+            self.say('★ 没找到 Audiveris。识别这一步是它做的，'
+                     '请先安装，或在上面输入框手工填路径。')
 
     def clear(self):
         self.txt.delete('1.0', 'end')
 
+    def copy_log(self):
+        """把整段日志放进剪贴板 —— 出问题时用户直接粘贴给别人。"""
+        self.root.clipboard_clear()
+        self.root.clipboard_append(self.txt.get('1.0', 'end'))
+        self.say('（日志已复制到剪贴板）')
+
     def say(self, s):
-        self.q.put(s if s.endswith('\n') else s + '\n')
+        for ln in str(s).splitlines() or ['']:
+            self.q.put(ln)
 
     def save_xml(self):
         if not self.last_xml or not self.last_xml.exists():
             messagebox.showinfo('提示', '还没有生成 MusicXML。')
             return
         dst = filedialog.asksaveasfilename(
-            defaultextension='.musicxml',
-            initialfile=self.last_xml.name,
+            defaultextension='.musicxml', initialfile=self.last_xml.name,
             filetypes=[('MusicXML', '*.musicxml'), ('所有文件', '*.*')])
         if dst:
             Path(dst).write_bytes(self.last_xml.read_bytes())
@@ -127,62 +154,76 @@ class App:
             messagebox.showerror('错误', '请先选择一个存在的 PDF。')
             return
         self.busy = True
+        self.t0 = time.time()
+        self.last_out = time.time()
         self.status.set('工作…')
         self.btn_full.state(['disabled'])
         self.btn_check.state(['disabled'])
-        threading.Thread(target=self._work, args=(pdf, full), daemon=True).start()
+        self.say('=' * 60)
+        self.say(f'开始：{pdf.name}   模式：{"转换" if full else "只做自检"}')
+        threading.Thread(target=self._work, args=(pdf, full),
+                         daemon=True).start()
 
     def _work(self, pdf: Path, full: bool):
         try:
             from omr_engine import referee
             omr = None
-            av = self.av_var.get().strip()
             if full:
-                avp = find_audiveris(av or None)
+                avp = find_audiveris(self.av_var.get().strip() or None)
                 if avp is None:
-                    self.say('★ 没有 Audiveris，无法从 PDF 生成 .omr。'
-                             '可以先用别的方式得到 .omr 再跑"只做自检"。')
+                    self.say('★ 没有 Audiveris，无法从 PDF 生成 .omr。')
                     return
                 work = pdf.parent / (pdf.stem + '_omr')
                 work.mkdir(parents=True, exist_ok=True)
-                self.say(f'[1/2] Audiveris 正在识别…（这一步最慢）\n  → {work}')
-                r = subprocess.run([str(avp), '-batch', '-output', str(work),
-                                    '-export', str(pdf)],
-                                   capture_output=True, text=True,
-                                   errors='replace')
-                if r.returncode != 0:
-                    low = ((r.stderr or '') + (r.stdout or '')).lower()
-                    if 'insufficient memory' in low or 'outofmemory' in low:
-                        self.say('★ Audiveris 内存不足（Java 堆申请失败）。'
-                                 '关掉别的程序，或设 JAVA_TOOL_OPTIONS=-Xmx2g 再试。')
-                    else:
-                        self.say(f'★ Audiveris 失败 (exit {r.returncode})')
+                self.say('[1/2] Audiveris 识别中（这一步最慢，通常 1~3 分钟）')
+                self.say(f'      程序: {avp}')
+                self.say(f'      输出目录: {work}')
+                cmd = [str(avp), '-batch', '-output', str(work),
+                       '-export', str(pdf)]
+                p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                     stderr=subprocess.STDOUT, text=True,
+                                     errors='replace', bufsize=1,
+                                     encoding='utf-8')
+                # ★ 逐行转发 Audiveris 的输出：它自己会报走到哪一步
+                #   （LOAD / BINARY / GRID / HEADS / RHYTHMS / PAGE …）
+                for line in p.stdout:                      # type: ignore
+                    line = line.rstrip()
+                    if line:
+                        self.last_out = time.time()
+                        self.say('    ' + line[:160])
+                rc = p.wait()
+                if rc != 0:
+                    self.say(f'★ Audiveris 失败 (exit {rc})')
                     return
                 omrs = list(work.rglob('*.omr'))
                 if not omrs:
                     self.say('★ Audiveris 没有产出 .omr。')
                     return
                 omr = omrs[0]
-                self.say(f'[2/2] 结构化导出 ← {omr.name}')
+                self.say(f'      ✔ .omr 已生成: {omr.name}')
 
             xml = pdf.parent / (pdf.stem + '.musicxml')
             if full and omr is not None:
+                self.say('[2/2] 结构化导出 → MusicXML')
                 from omr_engine.fusion.omr_structural_export import (
                     export_structural_musicxml)
                 export_structural_musicxml(omr, xml, verbose=False,
                                            no_sidecars=True)
                 self.last_xml = xml
-                self.say(f'已写出 MusicXML: {xml}')
+                self.say(f'      ✔ 已写出: {xml}')
+            else:
+                self.say('[2/2] 跳过导出（只做自检）')
 
             self.say('')
+            self.say('正在生成自检报告…')
             rep = referee.check(pdf, xml if xml.exists() else None,
                                 omr_path=omr)
             self.say(referee.format_report(rep))
-            self.last_report = rep
+            self.say(f'完成，共 {time.time() - self.t0:.0f} 秒。')
         except Exception as e:                     # 界面上不要抛栈
             import traceback
             self.say('★ 出错：' + str(e))
-            self.say(traceback.format_exc()[-1200:])
+            self.say(traceback.format_exc()[-1500:])
         finally:
             self.root.after(0, self._done)
 
@@ -195,26 +236,21 @@ class App:
     def drain(self):
         try:
             while True:
-                self.txt.insert('end', self.q.get_nowait())
+                ln = self.q.get_nowait()
+                ts = time.strftime('%M:%S', time.gmtime(time.time() - self.t0))
+                self.txt.insert('end', f'[{ts}] {ln}\n')
                 self.txt.see('end')
         except queue.Empty:
             pass
-        self.root.after(120, self.drain)
-
-
-def _force_utf8_stdio():
-    """把 stdout/stderr 强制成 UTF-8（出错时用替换字符，不抛异常）。
-
-    为什么必须由程序自己做：本项目所有输出都是中文，而 Windows 控制台
-    默认是 cp936/cp1252。打包成 exe 后，靠 PYTHONIOENCODING 环境变量
-    并不可靠（实测 CI 里设了仍然崩），所以启动时自己改。
-    """
-    import sys as _sys
-    for _s in (_sys.stdout, _sys.stderr):
-        try:
-            _s.reconfigure(encoding='utf-8', errors='replace')
-        except Exception:
-            pass
+        # 心跳：长时间没有新输出就报一声，让用户知道"还在跑、不是卡死"
+        if self.busy and time.time() - self.last_out > 12:
+            self.last_out = time.time()
+            self.txt.insert(
+                'end',
+                f'[{time.strftime("%M:%S", time.gmtime(time.time() - self.t0))}]'
+                ' …仍在运行（Audiveris 在算，没有新输出）\n')
+            self.txt.see('end')
+        self.root.after(100, self.drain)
 
 
 def main():
@@ -225,9 +261,8 @@ def main():
     except tk.TclError:
         pass
     App(root)
-    # ★ 启动时把自己提到最前。不这么做窗口会开在浏览器后面，
-    #   用户会以为"点了没反应"。置顶只保持 0.6 秒，之后恢复普通层级，
-    #   免得一直压着别的窗口。
+    # 启动时把自己提到最前：不这么做窗口会开在浏览器后面，
+    # 用户会以为"点了没反应"。置顶只保持 0.6 秒。
     try:
         root.lift()
         root.attributes('-topmost', True)
